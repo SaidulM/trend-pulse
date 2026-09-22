@@ -100,9 +100,9 @@ def fetch_hackernews():
 def get_client():
     creds_dict = json.loads(os.environ['GOOGLE_SHEETS_CREDENTIALS'])
     scopes = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'
-]
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
+    ]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(creds)
 
