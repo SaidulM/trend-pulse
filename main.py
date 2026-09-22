@@ -1,18 +1,24 @@
 import os
 import json
+import asyncio
 import requests
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
-from xml.etree import ElementTree as ET
 from collections import defaultdict
 
+# ─── trendspyg (Google Trends with category filter) ───
+from trendspyg import download_google_trends_rss
+
+# ─── trend-pulse (20+ sources, zero auth) ───
+from trend_pulse.aggregator import TrendAggregator
+
+# ─── Configuration ───
 COUNTRIES = ['India', 'USA', 'UK']
 GEO = {'India': 'IN', 'USA': 'US', 'UK': 'GB'}
-
-# ─── প্রতি ক্যাটাগরিতে সর্বোচ্চ কত টপিক ───
 LIMIT_PER_CATEGORY = 10
 
+# ─── আপনার ক্যাটাগরি ───
 CATEGORIES = {
     'AI': ['ai ', ' ai', 'artificial intelligence', 'chatgpt', 'gemini', 'openai',
            'machine learning', 'deep learning', 'llm', 'claude', 'copilot', 'neural'],
@@ -32,24 +38,31 @@ CATEGORIES = {
                    'president', 'minister', 'parliament', 'military'],
     'Best Products': ['best ', 'top ', 'review', 'buy', 'deal', 'offer', 'sale',
                       'cheap', 'price', 'discount', 'launch', 'compare'],
-    'Entertainment': ['movie', 'film', 'actor', 'actress', 'bollywood', 'hollywood',
-                      'music', 'song', 'album', 'netflix', 'series', 'show', 'tv',
-                      'celebrity', 'box office', 'trailer'],
-    'Sports': ['cricket', 'football', 'soccer', 'nba', 'ipl', 'match', 'tournament',
-               'olympic', 'fifa', 'world cup', 'player', 'team', 'score', 'league']
 }
 
-# ─── নতুন প্ল্যাটফর্ম যোগ করতে চাইলে এখানে একটি ফাংশন বানিয়ে
-#     PLATFORMS ডিকশনারিতে নাম যোগ করলেই হবে ───
+# ─── trendspyg ক্যাটাগরি ম্যাপিং ───
+TRENDSPYG_CATEGORY_MAP = {
+    'technology': 'Tech',
+    'business': 'Business',
+    'health': 'Health',
+    'sports': 'Sports',
+    'entertainment': 'Entertainment',
+    'science': 'Tech',
+    'general': 'General',
+}
+
 
 def categorize(topic):
+    """কীওয়ার্ড ম্যাচিং করে ক্যাটাগরি নির্ধারণ"""
     t = ' ' + topic.lower() + ' '
     for cat, kws in CATEGORIES.items():
         if any(kw in t for kw in kws):
             return cat
     return 'General'
 
+
 def estimate_competition(topic):
+    """কীওয়ার্ডের দৈর্ঘ্য দিয়ে competition অনুমান"""
     words = len(topic.split())
     if words <= 2:
         return 'High'
@@ -57,43 +70,46 @@ def estimate_competition(topic):
         return 'Medium'
     return 'Low'
 
-def fetch_google_trends(geo):
-    url = f'https://trends.google.com/trending/rss?geo={geo}'
+
+def fetch_google_trends_categorized(geo):
+    """trendspyg দিয়ে ক্যাটাগরি-ভিত্তিক Google Trends ডেটা"""
+    all_items = []
+    for cat_key in TRENDSPYG_CATEGORY_MAP.keys():
+        try:
+            env = download_google_trends_rss(geo=geo, normalize=True, category=cat_key)
+            for trend in env.get('trends', []):
+                all_items.append({
+                    'topic': trend.get('keyword', ''),
+                    'source': trend.get('news', [{}])[0].get('url', '') if trend.get('news') else '',
+                    'volume': f"{trend.get('volume_min', 0):,}+",
+                    'platform': f'Google Trends ({cat_key})'
+                })
+        except Exception as e:
+            print(f'  trendspyg {cat_key} {geo}: {e}')
+    return all_items
+
+
+async def fetch_trend_pulse(geo):
+    """trend-pulse দিয়ে ২০+ সোর্স থেকে ডেটা"""
     try:
-        r = requests.get(url, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
-        r.raise_for_status()
-        root = ET.fromstring(r.content)
-        ns = {'ht': 'https://trends.google.com/trending/rss'}
+        agg = TrendAggregator()
+        result = await agg.trending(geo=geo, count=50)
         items = []
-        for item in root.findall('.//item'):
-            title = (item.findtext('title') or '').strip()
-            link = (item.findtext('link') or '').strip()
-            traffic = (item.findtext('ht:approx_traffic', namespaces=ns) or '').strip()
-            if title:
-                items.append({'topic': title, 'source': link, 'volume': traffic})
+        for item in result.get('merged_top', []):
+            items.append({
+                'topic': item.get('keyword', ''),
+                'source': item.get('url', ''),
+                'volume': item.get('score', ''),
+                'platform': item.get('source_name', 'TrendPulse')
+            })
         return items
     except Exception as e:
-        print(f'Google Trends {geo}: {e}')
+        print(f'  trend-pulse {geo}: {e}')
         return []
 
-def fetch_google_news(geo):
-    url = f'https://news.google.com/rss?hl=en-{geo}&gl={geo}&ceid={geo}:en'
-    try:
-        r = requests.get(url, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
-        r.raise_for_status()
-        root = ET.fromstring(r.content)
-        items = []
-        for item in root.findall('.//item')[:30]:
-            title = (item.findtext('title') or '').strip()
-            link = (item.findtext('link') or '').strip()
-            if title:
-                items.append({'topic': title, 'source': link, 'volume': ''})
-        return items
-    except Exception as e:
-        print(f'Google News {geo}: {e}')
-        return []
 
 def fetch_reddit(sub):
+    """Reddit পাবলিক JSON (কোনো key লাগে না)"""
     url = f'https://www.reddit.com/r/{sub}/hot.json?limit=30'
     try:
         r = requests.get(url, timeout=30, headers={'User-Agent': 'TrendBot/1.0'})
@@ -105,53 +121,85 @@ def fetch_reddit(sub):
             items.append({
                 'topic': d.get('title', ''),
                 'source': f"https://reddit.com{d.get('permalink','')}",
-                'volume': f"{d.get('score', 0)} upvotes"
+                'volume': f"{d.get('score', 0)} upvotes",
+                'platform': f'Reddit/{sub}'
             })
         return items
     except Exception as e:
-        print(f'Reddit {sub}: {e}')
+        print(f'  Reddit {sub}: {e}')
         return []
 
-def fetch_youtube(region):
-    instances = [
-        'https://pipedapi.kavin.rocks',
-        'https://api.piped.yt',
-        'https://pipedapi.adminforge.de'
-    ]
-    for base in instances:
-        try:
-            r = requests.get(f'{base}/trending?region={region}', timeout=20)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            return [{
-                'topic': v.get('title', ''),
-                'source': f"https://youtube.com{v.get('url','')}",
-                'volume': f"{v.get('views', 0)} views"
-            } for v in data[:30]]
-        except Exception as e:
-            print(f'YouTube {base}: {e}')
-            continue
-    return []
 
-# ─── PLATFORMS: এখানে নতুন প্ল্যাটফর্ম যোগ করুন ───
-def get_platforms(country):
-    geo = GEO[country]
-    sub_map = {
-        'India': ['india', 'IndianStockMarket', 'IndiaSpeaks'],
-        'USA': ['all', 'technology', 'worldnews'],
-        'UK': ['unitedkingdom', 'uknews', 'ukpolitics']
-    }
-    platforms = {
-        'Google Trends': fetch_google_trends(geo),
-        'Google News': fetch_google_news(geo),
-        'YouTube': fetch_youtube(geo)
-    }
-    for sub in sub_map[country]:
-        platforms[f'Reddit/{sub}'] = fetch_reddit(sub)
-    return platforms
+def fetch_hackernews():
+    """Hacker News ফায়ারবেস API (কোনো key লাগে না)"""
+    try:
+        r = requests.get('https://hacker-news.firebaseio.com/v0/topstories.json', timeout=30)
+        ids = r.json()[:20]
+        items = []
+        for i in ids:
+            d = requests.get(f'https://hacker-news.firebaseio.com/v0/item/{i}.json', timeout=15).json()
+            items.append({
+                'topic': d.get('title', ''),
+                'source': d.get('url') or f"https://news.ycombinator.com/item?id={i}",
+                'volume': f"{d.get('score', 0)} points",
+                'platform': 'Hacker News'
+            })
+        return items
+    except Exception as e:
+        print(f'  HN: {e}')
+        return []
+
+
+def fetch_github_trending():
+    """GitHub Trending (স্ক্র্যাপ, কোনো key লাগে না)"""
+    try:
+        r = requests.get('https://github.com/trending', timeout=30,
+                         headers={'User-Agent': 'Mozilla/5.0'})
+        r.raise_for_status()
+        import re
+        items = []
+        for match in re.findall(r'<h2 class="h3 lh-condensed">\s*<a href="([^"]+)"[^>]*>.*?</h2>',
+                                r.text, re.DOTALL)[:15]:
+            repo = match.strip('/')
+            items.append({
+                'topic': repo.replace('/', ' / '),
+                'source': f'https://github.com/{repo}',
+                'volume': '',
+                'platform': 'GitHub Trending'
+            })
+        return items
+    except Exception as e:
+        print(f'  GitHub Trending: {e}')
+        return []
+
+
+def fetch_product_hunt():
+    """Product Hunt RSS (ফ্রি, কোনো key লাগে না)"""
+    try:
+        r = requests.get('https://www.producthunt.com/feed', timeout=30,
+                         headers={'User-Agent': 'Mozilla/5.0'})
+        r.raise_for_status()
+        from xml.etree import ElementTree as ET
+        root = ET.fromstring(r.content)
+        items = []
+        for item in root.findall('.//item')[:15]:
+            title = (item.findtext('title') or '').strip()
+            link = (item.findtext('link') or '').strip()
+            if title:
+                items.append({
+                    'topic': title,
+                    'source': link,
+                    'volume': '',
+                    'platform': 'Product Hunt'
+                })
+        return items
+    except Exception as e:
+        print(f'  Product Hunt: {e}')
+        return []
+
 
 def get_client():
+    """Google Sheets ক্লায়েন্ট"""
     creds_dict = json.loads(os.environ['GOOGLE_SHEETS_CREDENTIALS'])
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
@@ -159,6 +207,7 @@ def get_client():
     ]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(creds)
+
 
 def get_next_country(ss):
     """Rotation: India → USA → UK → India ..."""
@@ -171,7 +220,9 @@ def get_next_country(ss):
     idx = COUNTRIES.index(last) if last in COUNTRIES else -1
     return COUNTRIES[(idx + 1) % len(COUNTRIES)]
 
+
 def save_last_country(ss, country):
+    """Config ট্যাবে last country সেভ"""
     config = ss.worksheet('Config')
     records = config.get_all_values()
     for i, row in enumerate(records, start=1):
@@ -179,6 +230,44 @@ def save_last_country(ss, country):
             config.update_cell(i, 2, country)
             return
     config.append_row(['Last Country', country])
+
+
+def collect_all_sources(country):
+    """একটি দেশের জন্য সব সোর্স থেকে ডেটা সংগ্রহ"""
+    geo = GEO[country]
+    all_items = []
+
+    # ১. Google Trends (trendspyg — ক্যাটাগরি ফিল্টার সহ)
+    all_items.extend(fetch_google_trends_categorized(geo))
+
+    # ২. trend-pulse (২০+ সোর্স একসাথে)
+    try:
+        pulse_items = asyncio.run(fetch_trend_pulse(geo))
+        all_items.extend(pulse_items)
+    except Exception as e:
+        print(f'trend-pulse error: {e}')
+
+    # ৩. Reddit (একাধিক সাবরেডিট)
+    sub_map = {
+        'India': ['india', 'IndianStockMarket', 'IndiaSpeaks'],
+        'USA': ['all', 'technology', 'worldnews'],
+        'UK': ['unitedkingdom', 'uknews', 'ukpolitics']
+    }
+    for sub in sub_map[country]:
+        all_items.extend(fetch_reddit(sub))
+
+    # ৪. Hacker News (শুধু USA-তে, ডুপ্লিকেট এড়াতে)
+    if country == 'USA':
+        all_items.extend(fetch_hackernews())
+
+    # ৫. GitHub Trending (সব দেশে)
+    all_items.extend(fetch_github_trending())
+
+    # ৬. Product Hunt (সব দেশে)
+    all_items.extend(fetch_product_hunt())
+
+    return all_items
+
 
 def main():
     client = get_client()
@@ -190,36 +279,51 @@ def main():
     ws = ss.worksheet(country)
     today = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
 
-    platforms = get_platforms(country)
+    # ─── সব সোর্স থেকে ডেটা ───
+    all_items = collect_all_sources(country)
 
-    rows = []
+    # ─── ডুপ্লিকেট সরানো + ক্যাটাগরি অনুযায়ী গ্রুপ ───
     seen = set()
+    rows = []
+    cat_counter = defaultdict(int)
 
-    for platform_name, items in platforms.items():
-        cat_counter = defaultdict(int)
-        for item in items:
-            topic = item['topic'].strip()
-            if not topic:
-                continue
-            key = topic.lower()
-            if key in seen:
-                continue
-            cat = categorize(topic)
-            if cat_counter[cat] >= LIMIT_PER_CATEGORY:
-                continue
-            seen.add(key)
-            cat_counter[cat] += 1
-            rows.append([
-                country, platform_name, cat, topic,
-                item['source'], item.get('volume', ''),
-                estimate_competition(topic), '', '', today
-            ])
+    for item in all_items:
+        topic = item['topic'].strip()
+        if not topic:
+            continue
+        key = topic.lower()
+        if key in seen:
+            continue
 
+        cat = categorize(topic)
+        if cat_counter[cat] >= LIMIT_PER_CATEGORY:
+            continue
+
+        seen.add(key)
+        cat_counter[cat] += 1
+
+        rows.append([
+            country,
+            item.get('platform', 'Unknown'),
+            cat,
+            topic,
+            item.get('source', ''),
+            item.get('volume', ''),
+            estimate_competition(topic),
+            '',  # CPC (ফ্রিতে পাওয়া যায় না)
+            '',  # Rank
+            today
+        ])
+
+    # ─── শিটে লেখা ───
     if rows:
         ws.append_rows(rows, value_input_option='USER_ENTERED')
 
     save_last_country(ss, country)
+
     print(f'✅ {country}: {len(rows)} rows added')
+    print(f'  Categories: {dict(cat_counter)}')
+
 
 if __name__ == '__main__':
     main()
