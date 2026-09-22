@@ -1,0 +1,4 @@
+trend-pulse
+gspread
+google-auth
+requests
