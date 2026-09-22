@@ -1,159 +1,229 @@
 import os
 import json
-import sys
+import re
 import requests
 import gspread
-import re
+from urllib.parse import quote
 from google.oauth2.service_account import Credentials
 from datetime import datetime
-from collections import defaultdict
 from xml.etree import ElementTree as ET
+
+TIMEOUT = 15
+LIMIT_PER_CATEGORY = 15
+
+CATEGORY_QUERIES = {
+    'AI': ['artificial intelligence', 'ChatGPT', 'OpenAI', 'machine learning'],
+    'Tech': ['technology', 'smartphone', 'iPhone', 'Android'],
+    'Business': ['stock market', 'cryptocurrency', 'business news', 'startup'],
+    'Islamic': ['Islam', 'Muslim', 'Ramadan', 'Quran'],
+    'Health': ['health tips', 'medicine', 'fitness', 'nutrition'],
+    'World News': ['world news', 'war', 'election', 'geopolitics'],
+    'Best Products': ['best products', 'product review', 'top deals', 'buying guide'],
+}
+
+HEADERS = ['Country', 'Platform', 'Category', 'Topic', 'Source Link',
+           'Description', 'Source Name', 'Search Volume', 'Competition',
+           'Published Date', 'Fetched At']
+
 
 def log(msg):
     print(msg, flush=True)
 
-COUNTRIES = ['India', 'USA', 'UK']
-GEO = {'India': 'IN', 'USA': 'US', 'UK': 'GB'}
-LIMIT_PER_CATEGORY = 5
-TIMEOUT = 10
 
-CATEGORIES = {
-    'AI': ['ai ', ' ai', 'artificial intelligence', 'chatgpt', 'gemini', 'openai',
-           'machine learning', 'deep learning', 'llm', 'claude', 'copilot', 'neural'],
-    'Tech': ['tech', 'software', 'app ', 'gadget', 'iphone', 'android', 'computer',
-             'laptop', 'samsung', 'pixel', 'windows', 'apple', 'microsoft', 'chip',
-             'semiconductor', 'gpu', 'nvidia', 'intel', 'amd'],
-    'Business': ['business', 'stock', 'market', 'economy', 'finance', 'crypto',
-                 'bitcoin', 'ethereum', 'startup', 'ipo', 'invest', 'trade',
-                 'inflation', 'gdp', 'bank', 'rupee', 'dollar', 'nasdaq', 'sensex'],
-    'Islamic': ['islam', 'muslim', 'quran', 'hadith', 'ramadan', 'prayer', 'hajj',
-                'umrah', 'eid', 'mosque', 'halal', 'prophet', 'sunnah', 'dua'],
-    'Health': ['health', 'covid', 'vaccine', 'fitness', 'diet', 'medicine', 'hospital',
-               'cancer', 'diabetes', 'mental health', 'yoga', 'nutrition', 'doctor',
-               'weight loss', 'gym', 'workout'],
-    'World News': ['war', 'conflict', 'election', 'protest', 'crisis', 'attack',
-                   'ukraine', 'gaza', 'israel', 'russia', 'china', 'iran', 'nato',
-                   'president', 'minister', 'parliament', 'military'],
-    'Best Products': ['best ', 'top ', 'review', 'buy', 'deal', 'offer', 'sale',
-                      'cheap', 'price', 'discount', 'launch', 'compare'],
-}
-
-def categorize(topic):
-    t = ' ' + topic.lower() + ' '
-    for cat, kws in CATEGORIES.items():
-        if any(kw in t for kw in kws):
-            return cat
-    return 'General'
-
-def estimate_competition(topic):
-    words = len(topic.split())
-    if words <= 2:
-        return 'High'
-    elif words <= 4:
-        return 'Medium'
-    return 'Low'
-
-def fetch_google_trends(geo):
-    url = f'https://trends.google.com/trending/rss?geo={geo}'
-    try:
-        r = requests.get(url, timeout=TIMEOUT, headers={'User-Agent': 'Mozilla/5.0'})
-        r.raise_for_status()
-        root = ET.fromstring(r.content)
-        ns = {'ht': 'https://trends.google.com/trending/rss'}
-        items = []
-        for item in root.findall('.//item'):
-            title = (item.findtext('title') or '').strip()
-            link = (item.findtext('link') or '').strip()
-            traffic = (item.findtext('ht:approx_traffic', namespaces=ns) or '').strip()
-            if title:
-                items.append({'topic': title, 'source': link, 'volume': traffic,
-                              'platform': 'Google Trends'})
-        log(f'  [Google Trends] {len(items)} items')
-        return items
-    except Exception as e:
-        log(f'  [Google Trends] ERROR: {e}')
-        return []
-
-def fetch_google_news(geo):
-    url = f'https://news.google.com/rss?hl=en-{geo}&gl={geo}&ceid={geo}:en'
+def fetch_google_news_search(query):
+    url = f'https://news.google.com/rss/search?q={quote(query)}&hl=en-US&gl=US&ceid=US:en'
     try:
         r = requests.get(url, timeout=TIMEOUT, headers={'User-Agent': 'Mozilla/5.0'})
         r.raise_for_status()
         root = ET.fromstring(r.content)
         items = []
-        for item in root.findall('.//item')[:30]:
+        for item in root.findall('.//item')[:20]:
             title = (item.findtext('title') or '').strip()
             link = (item.findtext('link') or '').strip()
+            pub = (item.findtext('pubDate') or '').strip()
+            desc = (item.findtext('description') or '').strip()
+            src_el = item.find('source')
+            src_name = src_el.text if src_el is not None else ''
+            desc = re.sub(r'<[^>]+>', '', desc)[:300]
             if title:
-                items.append({'topic': title, 'source': link, 'volume': '',
-                              'platform': 'Google News'})
-        log(f'  [Google News] {len(items)} items')
-        return items
-    except Exception as e:
-        log(f'  [Google News] ERROR: {e}')
-        return []
-
-def fetch_hackernews():
-    try:
-        r = requests.get('https://hacker-news.firebaseio.com/v0/topstories.json',
-                         timeout=TIMEOUT)
-        ids = r.json()[:15]
-        items = []
-        for i in ids:
-            try:
-                d = requests.get(f'https://hacker-news.firebaseio.com/v0/item/{i}.json',
-                                 timeout=TIMEOUT).json()
                 items.append({
-                    'topic': d.get('title', ''),
-                    'source': d.get('url') or f"https://news.ycombinator.com/item?id={i}",
-                    'volume': f"{d.get('score', 0)} points",
-                    'platform': 'Hacker News'
+                    'topic': title, 'source': link, 'description': desc,
+                    'source_name': src_name, 'date': pub, 'platform': 'Google News'
                 })
-            except Exception:
-                continue
-        log(f'  [Hacker News] {len(items)} items')
         return items
     except Exception as e:
-        log(f'  [Hacker News] ERROR: {e}')
+        log(f'    [Google News: {query}] ERROR: {e}')
         return []
 
-def fetch_github_trending():
+
+def fetch_hackernews_search(keyword):
     try:
-        r = requests.get('https://github.com/trending', timeout=TIMEOUT,
-                         headers={'User-Agent': 'Mozilla/5.0'})
+        url = f'https://hn.algolia.com/api/v1/search?query={quote(keyword)}&tags=story&hitsPerPage=15'
+        r = requests.get(url, timeout=TIMEOUT)
         r.raise_for_status()
         items = []
-        matches = re.findall(r'<h2 class="h3 lh-condensed">\s*<a href="([^"]+)"',
-                             r.text, re.DOTALL)[:15]
-        for m in matches:
-            repo = m.strip('/')
-            items.append({'topic': repo.replace('/', ' / '),
-                          'source': f'https://github.com/{repo}',
-                          'volume': '', 'platform': 'GitHub Trending'})
-        log(f'  [GitHub Trending] {len(items)} items')
+        for hit in r.json().get('hits', []):
+            items.append({
+                'topic': hit.get('title', ''),
+                'source': hit.get('url') or f"https://news.ycombinator.com/item?id={hit.get('objectID')}",
+                'description': (hit.get('story_text') or '')[:300],
+                'source_name': 'Hacker News',
+                'date': hit.get('created_at', ''),
+                'platform': 'Hacker News'
+            })
         return items
     except Exception as e:
-        log(f'  [GitHub Trending] ERROR: {e}')
+        log(f'    [HN: {keyword}] ERROR: {e}')
         return []
 
-def fetch_product_hunt():
+
+def fetch_devto(tag):
     try:
-        r = requests.get('https://www.producthunt.com/feed', timeout=TIMEOUT,
-                         headers={'User-Agent': 'Mozilla/5.0'})
+        r = requests.get(f'https://dev.to/api/articles?tag={tag}&per_page=15', timeout=TIMEOUT)
+        r.raise_for_status()
+        items = []
+        for a in r.json():
+            items.append({
+                'topic': a.get('title', ''),
+                'source': a.get('url', ''),
+                'description': (a.get('description') or '')[:300],
+                'source_name': 'Dev.to',
+                'date': a.get('published_at', ''),
+                'platform': 'Dev.to'
+            })
+        return items
+    except Exception as e:
+        log(f'    [Dev.to: {tag}] ERROR: {e}')
+        return []
+
+
+def fetch_rss(url, name):
+    try:
+        r = requests.get(url, timeout=TIMEOUT, headers={'User-Agent': 'Mozilla/5.0'})
         r.raise_for_status()
         root = ET.fromstring(r.content)
         items = []
         for item in root.findall('.//item')[:15]:
             title = (item.findtext('title') or '').strip()
             link = (item.findtext('link') or '').strip()
+            pub = (item.findtext('pubDate') or '').strip()
+            desc = (item.findtext('description') or '').strip()
+            desc = re.sub(r'<[^>]+>', '', desc)[:300]
             if title:
-                items.append({'topic': title, 'source': link, 'volume': '',
-                              'platform': 'Product Hunt'})
-        log(f'  [Product Hunt] {len(items)} items')
+                items.append({
+                    'topic': title, 'source': link, 'description': desc,
+                    'source_name': name, 'date': pub, 'platform': name
+                })
         return items
     except Exception as e:
-        log(f'  [Product Hunt] ERROR: {e}')
+        log(f'    [{name}] ERROR: {e}')
         return []
+
+
+def fetch_coingecko():
+    try:
+        r = requests.get('https://api.coingecko.com/api/v3/search/trending', timeout=TIMEOUT)
+        r.raise_for_status()
+        items = []
+        for c in r.json().get('coins', [])[:10]:
+            coin = c.get('item', {})
+            items.append({
+                'topic': f"{coin.get('name')} ({coin.get('symbol')}) trending",
+                'source': f"https://www.coingecko.com/en/coins/{coin.get('id')}",
+                'description': f"Market cap rank: {coin.get('market_cap_rank', 'N/A')}",
+                'source_name': 'CoinGecko', 'date': '', 'platform': 'CoinGecko'
+            })
+        return items
+    except Exception as e:
+        log(f'    [CoinGecko] ERROR: {e}')
+        return []
+
+
+# ─── Category Collectors ───
+
+def collect_ai():
+    log('  [AI]')
+    items = []
+    for q in CATEGORY_QUERIES['AI']:
+        items.extend(fetch_google_news_search(q))
+    items.extend(fetch_devto('ai'))
+    items.extend(fetch_devto('machinelearning'))
+    items.extend(fetch_hackernews_search('AI'))
+    items.extend(fetch_hackernews_search('ChatGPT'))
+    return items
+
+
+def collect_tech():
+    log('  [Tech]')
+    items = []
+    for q in CATEGORY_QUERIES['Tech']:
+        items.extend(fetch_google_news_search(q))
+    items.extend(fetch_devto('programming'))
+    items.extend(fetch_hackernews_search('programming'))
+    items.extend(fetch_rss('https://techcrunch.com/feed/', 'TechCrunch'))
+    items.extend(fetch_rss('https://www.theverge.com/rss/index.xml', 'The Verge'))
+    return items
+
+
+def collect_business():
+    log('  [Business]')
+    items = []
+    for q in CATEGORY_QUERIES['Business']:
+        items.extend(fetch_google_news_search(q))
+    items.extend(fetch_coingecko())
+    items.extend(fetch_rss('https://feeds.a.dj.com/rss/RSSMarketsMain.xml', 'WSJ Markets'))
+    return items
+
+
+def collect_islamic():
+    log('  [Islamic]')
+    items = []
+    for q in CATEGORY_QUERIES['Islamic']:
+        items.extend(fetch_google_news_search(q))
+    items.extend(fetch_rss('https://aboutislam.net/feed/', 'About Islam'))
+    return items
+
+
+def collect_health():
+    log('  [Health]')
+    items = []
+    for q in CATEGORY_QUERIES['Health']:
+        items.extend(fetch_google_news_search(q))
+    items.extend(fetch_rss('https://www.medicalnewstoday.com/rss', 'Medical News Today'))
+    items.extend(fetch_rss('https://feeds.webmd.com/rss/rss.aspx?RSSSource=RSS_PUBLIC', 'WebMD'))
+    return items
+
+
+def collect_world_news():
+    log('  [World News]')
+    items = []
+    for q in CATEGORY_QUERIES['World News']:
+        items.extend(fetch_google_news_search(q))
+    items.extend(fetch_rss('http://feeds.bbci.co.uk/news/world/rss.xml', 'BBC World'))
+    items.extend(fetch_rss('https://www.aljazeera.com/xml/rss/all.xml', 'Al Jazeera'))
+    items.extend(fetch_rss('https://feeds.npr.org/1004/rss.xml', 'NPR World'))
+    return items
+
+
+def collect_best_products():
+    log('  [Best Products]')
+    items = []
+    for q in CATEGORY_QUERIES['Best Products']:
+        items.extend(fetch_google_news_search(q))
+    items.extend(fetch_rss('https://slickdeals.net/newsearch.php?searchin=first&rss=1', 'Slickdeals'))
+    return items
+
+
+COLLECTORS = {
+    'AI': collect_ai,
+    'Tech': collect_tech,
+    'Business': collect_business,
+    'Islamic': collect_islamic,
+    'Health': collect_health,
+    'World News': collect_world_news,
+    'Best Products': collect_best_products,
+}
+
 
 def get_client():
     log('  [Sheets] Connecting...')
@@ -167,94 +237,88 @@ def get_client():
     log('  [Sheets] Connected')
     return client
 
-def get_next_country(ss):
-    config = ss.worksheet('Config')
-    records = config.get_all_values()
-    last = 'UK'
-    for row in records:
-        if len(row) >= 2 and row[0] == 'Last Country':
-            last = row[1] or 'UK'
-    idx = COUNTRIES.index(last) if last in COUNTRIES else -1
-    return COUNTRIES[(idx + 1) % len(COUNTRIES)]
 
-def save_last_country(ss, country):
-    config = ss.worksheet('Config')
-    records = config.get_all_values()
-    for i, row in enumerate(records, start=1):
-        if len(row) >= 1 and row[0] == 'Last Country':
-            config.update_cell(i, 2, country)
-            return
-    config.append_row(['Last Country', country])
+def get_or_create_sheet(ss, name):
+    try:
+        ws = ss.worksheet(name)
+    except gspread.WorksheetNotFound:
+        ws = ss.add_worksheet(title=name, rows=2000, cols=len(HEADERS))
+        ws.append_row(HEADERS)
+        try:
+            ws.freeze(rows=1)
+        except Exception:
+            pass
+        log(f'  [Sheets] Created tab: {name}')
+    return ws
 
-def collect_all_sources(country):
-    geo = GEO[country]
-    all_items = []
-    log(f'▶ Fetching Google Trends ({geo})...')
-    all_items.extend(fetch_google_trends(geo))
-    log(f'▶ Fetching Google News ({geo})...')
-    all_items.extend(fetch_google_news(geo))
-    log(f'▶ Fetching Hacker News...')
-    all_items.extend(fetch_hackernews())
-    log(f'▶ Fetching GitHub Trending...')
-    all_items.extend(fetch_github_trending())
-    log(f'▶ Fetching Product Hunt...')
-    all_items.extend(fetch_product_hunt())
-    return all_items
+
+def dedupe(items):
+    seen = set()
+    out = []
+    for it in items:
+        t = (it.get('topic') or '').strip()
+        if not t:
+            continue
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+    return out
+
+
+def estimate_competition(topic):
+    words = len(topic.split())
+    if words <= 3:
+        return 'High'
+    elif words <= 6:
+        return 'Medium'
+    return 'Low'
+
 
 def main():
-    log('▶ Starting script')
+    log('▶ Starting')
     client = get_client()
-    log('▶ Opening Google Sheet')
     ss = client.open('Trend Data')
     log('▶ Sheet opened')
 
-    country = get_next_country(ss)
-    log(f'▶ This run: {country}')
-
-    ws = ss.worksheet(country)
     today = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
 
-    all_items = collect_all_sources(country)
-    log(f'▶ Total raw items: {len(all_items)}')
+    for category, collector in COLLECTORS.items():
+        log(f'▶ Category: {category}')
+        try:
+            items = dedupe(collector())
+        except Exception as e:
+            log(f'  Collector error: {e}')
+            items = []
+        log(f'  Unique items: {len(items)}')
 
-    seen = set()
-    rows = []
-    cat_counter = defaultdict(int)
+        ws = get_or_create_sheet(ss, category)
 
-    for item in all_items:
-        topic = item['topic'].strip()
-        if not topic:
-            continue
-        key = topic.lower()
-        if key in seen:
-            continue
-        cat = categorize(topic)
-        if cat_counter[cat] >= LIMIT_PER_CATEGORY:
-            continue
-        seen.add(key)
-        cat_counter[cat] += 1
-        rows.append([
-            country,
-            item.get('platform', 'Unknown'),
-            cat,
-            topic,
-            item.get('source', ''),
-            item.get('volume', ''),
-            estimate_competition(topic),
-            '', '', today
-        ])
+        rows = []
+        for it in items[:LIMIT_PER_CATEGORY]:
+            rows.append([
+                'USA',
+                it.get('platform', ''),
+                category,
+                it.get('topic', ''),
+                it.get('source', ''),
+                it.get('description', ''),
+                it.get('source_name', ''),
+                it.get('volume', ''),
+                estimate_competition(it.get('topic', '')),
+                it.get('date', ''),
+                today
+            ])
 
-    log(f'▶ Rows after filter: {len(rows)}')
-    log(f'▶ Categories: {dict(cat_counter)}')
+        if rows:
+            ws.append_rows(rows, value_input_option='USER_ENTERED')
+            log(f'  ✅ {category}: {len(rows)} rows added')
+        else:
+            log(f'  ⚠ {category}: no rows')
 
-    if rows:
-        ws.append_rows(rows, value_input_option='USER_ENTERED')
-        log(f'✅ {country}: {len(rows)} rows added')
-    else:
-        log('⚠ No rows to add')
-
-    save_last_country(ss, country)
     log('▶ Done')
+
 
 if __name__ == '__main__':
     main()
