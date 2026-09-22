@@ -3,20 +3,25 @@ import json
 import asyncio
 import requests
 import gspread
+import re
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 from collections import defaultdict
+from xml.etree import ElementTree as ET
 
-# ─── trendspyg (Google Trends with category filter) ───
+# ─── trendspyg (Google Trends, category filter) ───
 from trendspyg import download_google_trends_rss
 
 # ─── trend-pulse (20+ sources, zero auth) ───
 from trend_pulse.aggregator import TrendAggregator
 
+# ─── TikTokApi ───
+from TikTokApi import TikTokApi
+
 # ─── Configuration ───
 COUNTRIES = ['India', 'USA', 'UK']
 GEO = {'India': 'IN', 'USA': 'US', 'UK': 'GB'}
-LIMIT_PER_CATEGORY = 10
+LIMIT_PER_CATEGORY = 5  # প্রতিটি প্ল্যাটফর্মে প্রতি ক্যাটাগরিতে সর্বোচ্চ ৫টি
 
 # ─── আপনার ক্যাটাগরি ───
 CATEGORIES = {
@@ -41,15 +46,7 @@ CATEGORIES = {
 }
 
 # ─── trendspyg ক্যাটাগরি ম্যাপিং ───
-TRENDSPYG_CATEGORY_MAP = {
-    'technology': 'Tech',
-    'business': 'Business',
-    'health': 'Health',
-    'sports': 'Sports',
-    'entertainment': 'Entertainment',
-    'science': 'Tech',
-    'general': 'General',
-}
+TRENDSPYG_CATEGORIES = ['technology', 'business', 'health', 'sports', 'entertainment', 'science']
 
 
 def categorize(topic):
@@ -74,7 +71,7 @@ def estimate_competition(topic):
 def fetch_google_trends_categorized(geo):
     """trendspyg দিয়ে ক্যাটাগরি-ভিত্তিক Google Trends ডেটা"""
     all_items = []
-    for cat_key in TRENDSPYG_CATEGORY_MAP.keys():
+    for cat_key in TRENDSPYG_CATEGORIES:
         try:
             env = download_google_trends_rss(geo=geo, normalize=True, category=cat_key)
             for trend in env.get('trends', []):
@@ -108,6 +105,25 @@ async def fetch_trend_pulse(geo):
         return []
 
 
+async def fetch_tiktok_trending(count=20):
+    """TikTokApi দিয়ে ট্রেন্ডিং ভিডিও"""
+    try:
+        async with TikTokApi() as api:
+            await api.create_sessions(headless=True, num_sessions=1, sleep_after=3)
+            items = []
+            async for video in api.trending.videos(count=count):
+                items.append({
+                    'topic': video.as_dict.get('desc', ''),
+                    'source': f"https://www.tiktok.com/@{video.author.username}/video/{video.id}",
+                    'volume': f"{video.stats.get('playCount', 0):,} views",
+                    'platform': 'TikTok'
+                })
+            return items
+    except Exception as e:
+        print(f'  TikTok: {e}')
+        return []
+
+
 def fetch_reddit(sub):
     """Reddit পাবলিক JSON (কোনো key লাগে না)"""
     url = f'https://www.reddit.com/r/{sub}/hot.json?limit=30'
@@ -130,33 +146,12 @@ def fetch_reddit(sub):
         return []
 
 
-def fetch_hackernews():
-    """Hacker News ফায়ারবেস API (কোনো key লাগে না)"""
-    try:
-        r = requests.get('https://hacker-news.firebaseio.com/v0/topstories.json', timeout=30)
-        ids = r.json()[:20]
-        items = []
-        for i in ids:
-            d = requests.get(f'https://hacker-news.firebaseio.com/v0/item/{i}.json', timeout=15).json()
-            items.append({
-                'topic': d.get('title', ''),
-                'source': d.get('url') or f"https://news.ycombinator.com/item?id={i}",
-                'volume': f"{d.get('score', 0)} points",
-                'platform': 'Hacker News'
-            })
-        return items
-    except Exception as e:
-        print(f'  HN: {e}')
-        return []
-
-
 def fetch_github_trending():
     """GitHub Trending (স্ক্র্যাপ, কোনো key লাগে না)"""
     try:
         r = requests.get('https://github.com/trending', timeout=30,
                          headers={'User-Agent': 'Mozilla/5.0'})
         r.raise_for_status()
-        import re
         items = []
         for match in re.findall(r'<h2 class="h3 lh-condensed">\s*<a href="([^"]+)"[^>]*>.*?</h2>',
                                 r.text, re.DOTALL)[:15]:
@@ -179,7 +174,6 @@ def fetch_product_hunt():
         r = requests.get('https://www.producthunt.com/feed', timeout=30,
                          headers={'User-Agent': 'Mozilla/5.0'})
         r.raise_for_status()
-        from xml.etree import ElementTree as ET
         root = ET.fromstring(r.content)
         items = []
         for item in root.findall('.//item')[:15]:
@@ -195,6 +189,26 @@ def fetch_product_hunt():
         return items
     except Exception as e:
         print(f'  Product Hunt: {e}')
+        return []
+
+
+def fetch_hackernews():
+    """Hacker News ফায়ারবেস API (কোনো key লাগে না)"""
+    try:
+        r = requests.get('https://hacker-news.firebaseio.com/v0/topstories.json', timeout=30)
+        ids = r.json()[:20]
+        items = []
+        for i in ids:
+            d = requests.get(f'https://hacker-news.firebaseio.com/v0/item/{i}.json', timeout=15).json()
+            items.append({
+                'topic': d.get('title', ''),
+                'source': d.get('url') or f"https://news.ycombinator.com/item?id={i}",
+                'volume': f"{d.get('score', 0)} points",
+                'platform': 'Hacker News'
+            })
+        return items
+    except Exception as e:
+        print(f'  HN: {e}')
         return []
 
 
@@ -247,7 +261,14 @@ def collect_all_sources(country):
     except Exception as e:
         print(f'trend-pulse error: {e}')
 
-    # ৩. Reddit (একাধিক সাবরেডিট)
+    # ৩. TikTok
+    try:
+        tiktok_items = asyncio.run(fetch_tiktok_trending())
+        all_items.extend(tiktok_items)
+    except Exception as e:
+        print(f'TikTok error: {e}')
+
+    # ৪. Reddit (একাধিক সাবরেডিট)
     sub_map = {
         'India': ['india', 'IndianStockMarket', 'IndiaSpeaks'],
         'USA': ['all', 'technology', 'worldnews'],
@@ -256,14 +277,14 @@ def collect_all_sources(country):
     for sub in sub_map[country]:
         all_items.extend(fetch_reddit(sub))
 
-    # ৪. Hacker News (শুধু USA-তে, ডুপ্লিকেট এড়াতে)
+    # ৫. Hacker News (শুধু USA-তে, ডুপ্লিকেট এড়াতে)
     if country == 'USA':
         all_items.extend(fetch_hackernews())
 
-    # ৫. GitHub Trending (সব দেশে)
+    # ৬. GitHub Trending (সব দেশে)
     all_items.extend(fetch_github_trending())
 
-    # ৬. Product Hunt (সব দেশে)
+    # ৭. Product Hunt (সব দেশে)
     all_items.extend(fetch_product_hunt())
 
     return all_items
