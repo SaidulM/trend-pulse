@@ -5,15 +5,20 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 from xml.etree import ElementTree as ET
+from collections import defaultdict
 
-COUNTRIES = {'India': 'IN', 'USA': 'US', 'UK': 'GB'}
+COUNTRIES = ['India', 'USA', 'UK']
+GEO = {'India': 'IN', 'USA': 'US', 'UK': 'GB'}
+
+# ─── প্রতি ক্যাটাগরিতে সর্বোচ্চ কত টপিক ───
+LIMIT_PER_CATEGORY = 10
 
 CATEGORIES = {
     'AI': ['ai ', ' ai', 'artificial intelligence', 'chatgpt', 'gemini', 'openai',
            'machine learning', 'deep learning', 'llm', 'claude', 'copilot', 'neural'],
     'Tech': ['tech', 'software', 'app ', 'gadget', 'iphone', 'android', 'computer',
-             'laptop', 'samsung', 'google pixel', 'windows', 'apple', 'microsoft',
-             'chip', 'semiconductor', 'gpu', 'nvidia', 'intel', 'amd', 'startup tech'],
+             'laptop', 'samsung', 'pixel', 'windows', 'apple', 'microsoft', 'chip',
+             'semiconductor', 'gpu', 'nvidia', 'intel', 'amd'],
     'Business': ['business', 'stock', 'market', 'economy', 'finance', 'crypto',
                  'bitcoin', 'ethereum', 'startup', 'ipo', 'invest', 'trade',
                  'inflation', 'gdp', 'bank', 'rupee', 'dollar', 'nasdaq', 'sensex'],
@@ -26,13 +31,16 @@ CATEGORIES = {
                    'ukraine', 'gaza', 'israel', 'russia', 'china', 'iran', 'nato',
                    'president', 'minister', 'parliament', 'military'],
     'Best Products': ['best ', 'top ', 'review', 'buy', 'deal', 'offer', 'sale',
-                      'cheap', 'price', 'discount', 'launch', 'new launch', 'compare'],
+                      'cheap', 'price', 'discount', 'launch', 'compare'],
     'Entertainment': ['movie', 'film', 'actor', 'actress', 'bollywood', 'hollywood',
                       'music', 'song', 'album', 'netflix', 'series', 'show', 'tv',
                       'celebrity', 'box office', 'trailer'],
     'Sports': ['cricket', 'football', 'soccer', 'nba', 'ipl', 'match', 'tournament',
                'olympic', 'fifa', 'world cup', 'player', 'team', 'score', 'league']
 }
+
+# ─── নতুন প্ল্যাটফর্ম যোগ করতে চাইলে এখানে একটি ফাংশন বানিয়ে
+#     PLATFORMS ডিকশনারিতে নাম যোগ করলেই হবে ───
 
 def categorize(topic):
     t = ' ' + topic.lower() + ' '
@@ -47,8 +55,7 @@ def estimate_competition(topic):
         return 'High'
     elif words <= 4:
         return 'Medium'
-    else:
-        return 'Low'
+    return 'Low'
 
 def fetch_google_trends(geo):
     url = f'https://trends.google.com/trending/rss?geo={geo}'
@@ -61,15 +68,9 @@ def fetch_google_trends(geo):
         for item in root.findall('.//item'):
             title = (item.findtext('title') or '').strip()
             link = (item.findtext('link') or '').strip()
-            pub = (item.findtext('pubDate') or '').strip()
             traffic = (item.findtext('ht:approx_traffic', namespaces=ns) or '').strip()
             if title:
-                items.append({
-                    'topic': title,
-                    'source': link,
-                    'date': pub,
-                    'volume': traffic
-                })
+                items.append({'topic': title, 'source': link, 'volume': traffic})
         return items
     except Exception as e:
         print(f'Google Trends {geo}: {e}')
@@ -82,19 +83,18 @@ def fetch_google_news(geo):
         r.raise_for_status()
         root = ET.fromstring(r.content)
         items = []
-        for item in root.findall('.//item')[:25]:
+        for item in root.findall('.//item')[:30]:
             title = (item.findtext('title') or '').strip()
             link = (item.findtext('link') or '').strip()
-            pub = (item.findtext('pubDate') or '').strip()
             if title:
-                items.append({'topic': title, 'source': link, 'date': pub, 'volume': ''})
+                items.append({'topic': title, 'source': link, 'volume': ''})
         return items
     except Exception as e:
         print(f'Google News {geo}: {e}')
         return []
 
 def fetch_reddit(sub):
-    url = f'https://www.reddit.com/r/{sub}/hot.json?limit=25'
+    url = f'https://www.reddit.com/r/{sub}/hot.json?limit=30'
     try:
         r = requests.get(url, timeout=30, headers={'User-Agent': 'TrendBot/1.0'})
         r.raise_for_status()
@@ -102,20 +102,17 @@ def fetch_reddit(sub):
         items = []
         for c in data.get('data', {}).get('children', []):
             d = c['data']
-            score = d.get('score', 0)
             items.append({
                 'topic': d.get('title', ''),
                 'source': f"https://reddit.com{d.get('permalink','')}",
-                'date': datetime.utcfromtimestamp(d.get('created_utc', 0)).isoformat(),
-                'volume': f'{score} upvotes'
+                'volume': f"{d.get('score', 0)} upvotes"
             })
         return items
     except Exception as e:
         print(f'Reddit {sub}: {e}')
         return []
 
-def fetch_piped_trending(region):
-    """YouTube trending via Piped (free, no key)"""
+def fetch_youtube(region):
     instances = [
         'https://pipedapi.kavin.rocks',
         'https://api.piped.yt',
@@ -127,37 +124,32 @@ def fetch_piped_trending(region):
             if r.status_code != 200:
                 continue
             data = r.json()
-            items = []
-            for v in data[:20]:
-                items.append({
-                    'topic': v.get('title', ''),
-                    'source': f"https://youtube.com/watch?v={v.get('url','').replace('/watch?v=','')}",
-                    'date': datetime.utcfromtimestamp(v.get('uploadedDate', 0) if isinstance(v.get('uploadedDate'), int) else 0).isoformat(),
-                    'volume': f"{v.get('views', 0)} views"
-                })
-            return items
+            return [{
+                'topic': v.get('title', ''),
+                'source': f"https://youtube.com{v.get('url','')}",
+                'volume': f"{v.get('views', 0)} views"
+            } for v in data[:30]]
         except Exception as e:
-            print(f'Piped {base}: {e}')
+            print(f'YouTube {base}: {e}')
             continue
     return []
 
-def fetch_hackernews():
-    try:
-        r = requests.get('https://hacker-news.firebaseio.com/v0/topstories.json', timeout=30)
-        ids = r.json()[:20]
-        items = []
-        for i in ids:
-            d = requests.get(f'https://hacker-news.firebaseio.com/v0/item/{i}.json', timeout=15).json()
-            items.append({
-                'topic': d.get('title', ''),
-                'source': d.get('url') or f"https://news.ycombinator.com/item?id={i}",
-                'date': datetime.utcfromtimestamp(d.get('time', 0)).isoformat(),
-                'volume': f"{d.get('score', 0)} points"
-            })
-        return items
-    except Exception as e:
-        print(f'HN: {e}')
-        return []
+# ─── PLATFORMS: এখানে নতুন প্ল্যাটফর্ম যোগ করুন ───
+def get_platforms(country):
+    geo = GEO[country]
+    sub_map = {
+        'India': ['india', 'IndianStockMarket', 'IndiaSpeaks'],
+        'USA': ['all', 'technology', 'worldnews'],
+        'UK': ['unitedkingdom', 'uknews', 'ukpolitics']
+    }
+    platforms = {
+        'Google Trends': fetch_google_trends(geo),
+        'Google News': fetch_google_news(geo),
+        'YouTube': fetch_youtube(geo)
+    }
+    for sub in sub_map[country]:
+        platforms[f'Reddit/{sub}'] = fetch_reddit(sub)
+    return platforms
 
 def get_client():
     creds_dict = json.loads(os.environ['GOOGLE_SHEETS_CREDENTIALS'])
@@ -168,75 +160,66 @@ def get_client():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(creds)
 
+def get_next_country(ss):
+    """Rotation: India → USA → UK → India ..."""
+    config = ss.worksheet('Config')
+    records = config.get_all_values()
+    last = 'UK'
+    for row in records:
+        if len(row) >= 2 and row[0] == 'Last Country':
+            last = row[1] or 'UK'
+    idx = COUNTRIES.index(last) if last in COUNTRIES else -1
+    return COUNTRIES[(idx + 1) % len(COUNTRIES)]
+
+def save_last_country(ss, country):
+    config = ss.worksheet('Config')
+    records = config.get_all_values()
+    for i, row in enumerate(records, start=1):
+        if len(row) >= 1 and row[0] == 'Last Country':
+            config.update_cell(i, 2, country)
+            return
+    config.append_row(['Last Country', country])
+
 def main():
     client = get_client()
     ss = client.open('Trend Data')
+
+    country = get_next_country(ss)
+    print(f'▶ This run: {country}')
+
+    ws = ss.worksheet(country)
     today = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
 
-    subreddits = {
-        'India': ['india', 'IndianStockMarket', 'IndiaSpeaks', 'bollywood'],
-        'USA': ['all', 'technology', 'business', 'worldnews'],
-        'UK': ['unitedkingdom', 'uknews', 'ukpolitics']
-    }
+    platforms = get_platforms(country)
 
-    for country, geo in COUNTRIES.items():
-        ws = ss.worksheet(country)
-        rows = []
+    rows = []
+    seen = set()
 
-        # Google Trends
-        for item in fetch_google_trends(geo):
-            cat = categorize(item['topic'])
-            rows.append([country, 'Google Trends', cat, item['topic'],
-                         item['source'], item['volume'],
-                         estimate_competition(item['topic']), '', '', today])
+    for platform_name, items in platforms.items():
+        cat_counter = defaultdict(int)
+        for item in items:
+            topic = item['topic'].strip()
+            if not topic:
+                continue
+            key = topic.lower()
+            if key in seen:
+                continue
+            cat = categorize(topic)
+            if cat_counter[cat] >= LIMIT_PER_CATEGORY:
+                continue
+            seen.add(key)
+            cat_counter[cat] += 1
+            rows.append([
+                country, platform_name, cat, topic,
+                item['source'], item.get('volume', ''),
+                estimate_competition(topic), '', '', today
+            ])
 
-        # Google News
-        for item in fetch_google_news(geo):
-            cat = categorize(item['topic'])
-            rows.append([country, 'Google News', cat, item['topic'],
-                         item['source'], item['volume'],
-                         estimate_competition(item['topic']), '', '', today])
+    if rows:
+        ws.append_rows(rows, value_input_option='USER_ENTERED')
 
-        # Reddit (multiple subreddits)
-        for sub in subreddits[country]:
-            for item in fetch_reddit(sub):
-                cat = categorize(item['topic'])
-                rows.append([country, f'Reddit/{sub}', cat, item['topic'],
-                             item['source'], item['volume'],
-                             estimate_competition(item['topic']), '', '', today])
-
-        # YouTube trending
-        for item in fetch_piped_trending(geo):
-            cat = categorize(item['topic'])
-            rows.append([country, 'YouTube', cat, item['topic'],
-                         item['source'], item['volume'],
-                         estimate_competition(item['topic']), '', '', today])
-
-        # Hacker News (only USA to avoid duplicates)
-        if country == 'USA':
-            for item in fetch_hackernews():
-                cat = categorize(item['topic'])
-                rows.append([country, 'Hacker News', cat, item['topic'],
-                             item['source'], item['volume'],
-                             estimate_competition(item['topic']), '', '', today])
-
-        # Duplicate সরানো
-        seen = set()
-        unique_rows = []
-        for r in rows:
-            key = r[3].lower()
-            if key not in seen:
-                seen.add(key)
-                unique_rows.append(r)
-
-        if unique_rows:
-            ws.append_rows(unique_rows, value_input_option='USER_ENTERED')
-        print(f'{country}: {len(unique_rows)} rows added')
-
-        # ক্যাটাগরি ভিত্তিক কাউন্ট প্রিন্ট
-        from collections import Counter
-        cats = Counter([r[2] for r in unique_rows])
-        print(f'  Categories: {dict(cats)}')
+    save_last_country(ss, country)
+    print(f'✅ {country}: {len(rows)} rows added')
 
 if __name__ == '__main__':
     main()
