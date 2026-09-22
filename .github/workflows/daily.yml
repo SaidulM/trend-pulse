@@ -1,0 +1,18 @@
+name: Daily Trend Fetch
+on:
+  schedule:
+    - cron: '0 9 * * *'   # সকাল ৯টা UTC
+    - cron: '0 18 * * *'  # সন্ধ্যা ৬টা UTC
+  workflow_dispatch:       # ম্যানুয়ালি চালানোর অপশন
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python main.py
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
