@@ -11,11 +11,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Install Playwright browsers
-        run: python -m playwright install chromium
-      - name: Run trend collector
-        run: python main.py
+      - run: pip install -r requirements.txt
+      - run: python main.py
         env:
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
