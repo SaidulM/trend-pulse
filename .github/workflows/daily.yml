@@ -1,9 +1,8 @@
 name: Daily Trend Fetch
 on:
   schedule:
-    - cron: '0 9 * * *'   # সকাল ৯টা UTC
-    - cron: '0 18 * * *'  # সন্ধ্যা ৬টা UTC
-  workflow_dispatch:       # ম্যানুয়ালি চালানোর অপশন
+    - cron: '0 9 * * *'
+  workflow_dispatch:
 jobs:
   fetch:
     runs-on: ubuntu-latest
