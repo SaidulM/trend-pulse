@@ -1,5 +1,8 @@
+trendspyg
+trend-pulse
+TikTokApi
 requests
 gspread
 google-auth
-trendspyg
-trend-pulse
+playwright
+pandas
