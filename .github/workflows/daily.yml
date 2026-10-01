@@ -1,17 +1,32 @@
 name: Daily Trend Fetch
+
 on:
   schedule:
-    - cron: '0 9 * * *'
-  workflow_dispatch:
+    # 03:30 UTC = 9:00 AM (India/Bangladesh time) — runs every day
+    - cron: '30 3 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: daily-trends
+  cancel-in-progress: false
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
+
       - run: pip install -r requirements.txt
-      - run: python main.py
+
+      - name: Fetch trends and update Google Sheet
+        run: python main.py
         env:
-          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}

@@ -589,7 +589,9 @@ def main():
         existing = cleanup_old_rows(ws)
 
         # Re-run safety: note today's rows so we don't duplicate them
-        todays = [r for r in ws.get_all_values()[1:] if r and r[0][:10] == today]
+        today_d = datetime.utcnow().date()
+        todays = [r for r in ws.get_all_values()[1:]
+                  if r and parse_date(r[0]) and parse_date(r[0]).date() == today_d]
         if todays:
             log(f"    already has {len(todays)} rows for {today}, topping up only")
 
