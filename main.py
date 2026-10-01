@@ -648,8 +648,10 @@ JUNK = re.compile(
     r"the latest in technology|today'?s latest|"
     r"breaking news, (analysis|headlines)|^\s*viral trends\s*$|"
     r"^[\w .']{2,30}news\s*[-|–]\s*[\w .']+$|"
-    r"^[\w ,&.']{2,35}[-|–]\s*(the )?(new york times|nytimes|cnbc|cnn|bbc|wired|"
-    r"reuters|forbes|guardian|wsj|bloomberg|verge|techcrunch)[\w -]{0,10}$|"
+    r"^[\w ,&.']{2,45}[-|–]\s*(the )?(new york times|nytimes|cnbc|cnn|bbc|wired|"
+    r"reuters|forbes|guardian|wsj|bloomberg|verge|techcrunch|scitechdaily|"
+    r"engadget|gizmodo|zdnet|ars ?technica)[\w -]{0,10}$|"
+    r"news, research & innovations|"
     r"^google news\b|^(technology|tech|world|islam)\s*[-|–]|[-|–]\s*latest\s*$|"
     r"\|\s*(reuters|cnn|bbc|techcrunch|the verge)\s*$)", re.I)
 
@@ -673,9 +675,15 @@ def pick_topics(category, platform_items, already_used):
     if selection:
         log("    Gemini selection OK")
         for platform, chosen in selection.items():
+            done_groups = set()
             for i, angle in chosen:
                 it = dict(platform_items[platform][i])
                 it["_key"] = platform
+                g = it.get("group")
+                if g and g in done_groups:
+                    continue  # enforce: one pick per group (e.g. 1 AI + 1 Gadget)
+                if g:
+                    done_groups.add(g)
                 if normalize(it["topic"]) not in used_norm and it["topic"]:
                     if angle:
                         base = it["description"]
