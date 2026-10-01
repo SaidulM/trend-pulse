@@ -542,7 +542,6 @@ JUNK = re.compile(
     r"the latest in technology|today'?s latest|"
     r"breaking news, (analysis|headlines)|^\s*viral trends\s*$|"
     r"^[\w .']{2,30}news\s*[-|–]\s*[\w .']+$|"
-    r"[-|–]\s*(reuters|cnbc|cnn|bbc|wired|techcrunch|the verge)\s*$|"
     r"\|\s*(reuters|cnn|bbc|techcrunch|the verge)\s*$)", re.I)
 
 
