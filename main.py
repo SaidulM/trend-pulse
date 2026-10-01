@@ -551,16 +551,16 @@ def gemini_generate(prompt):
     for model in gemini_models():
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                f"{model}:generateContent?key={GEMINI_KEY}")
-        for attempt in range(4):
+        for attempt in range(3):
             try:
                 r = requests.post(url, json=body, timeout=90)
             except Exception as e:
                 log(f"    ! Gemini {model} network error: {str(e)[:120]}")
                 break
             if r.status_code in (429, 503):
-                wait = 20 * (attempt + 1)
+                wait = 15 * (attempt + 1)
                 log(f"    Gemini {model}: busy ({r.status_code}), waiting {wait}s "
-                    f"(attempt {attempt + 1}/4)")
+                    f"(attempt {attempt + 1}/3)")
                 time.sleep(wait)
                 continue
             if r.status_code == 404:
@@ -653,7 +653,9 @@ JUNK = re.compile(
     r"engadget|gizmodo|zdnet|ars ?technica)[\w -]{0,10}$|"
     r"news, research & innovations|"
     r"^google news\b|^(technology|tech|world|islam)\s*[-|–]|[-|–]\s*latest\s*$|"
-    r"\|\s*(reuters|cnn|bbc|techcrunch|the verge)\s*$)", re.I)
+    r"^the latest news in\b|^latest news\b|"
+    r"\|\s*(reuters|cnn|bbc|techcrunch|the verge|pcmag|pcworld|cnet|"
+    r"scitechdaily|engadget)\s*$)", re.I)
 
 
 def is_junk(topic):
