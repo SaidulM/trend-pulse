@@ -488,6 +488,57 @@ COLLECTORS = {
 # ----------------------------------------------------------------------------
 # Gemini selection
 # ----------------------------------------------------------------------------
+_GEMINI_AVAILABLE = None  # cached list of models this API key can actually use
+
+
+def gemini_models():
+    """Ask Google which models THIS key supports, prefer fast flash models."""
+    global _GEMINI_AVAILABLE
+    if _GEMINI_AVAILABLE is not None:
+        return _GEMINI_AVAILABLE
+    discovered = []
+    try:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/"
+                         f"models?key={GEMINI_KEY}&pageSize=100", timeout=30)
+        if r.status_code == 200:
+            for m in r.json().get("models", []):
+                name = m.get("name", "").replace("models/", "")
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" not in methods:
+                    continue
+                low = name.lower()
+                if any(x in low for x in ("embed", "image", "vision", "tts",
+                                          "audio", "live", "thinking", "exp")):
+                    continue
+                discovered.append(name)
+    except Exception as e:
+        log(f"    ! model discovery failed: {str(e)[:100]}")
+
+    def score(n):
+        n = n.lower()
+        s = 0
+        if "flash" in n:
+            s += 100
+        if "latest" in n:
+            s += 30
+        if "2.5" in n:
+            s += 20
+        elif "2.0" in n:
+            s += 10
+        if "lite" in n:
+            s -= 5
+        if "pro" in n:
+            s += 1
+        return -s
+
+    discovered.sort(key=score)
+    # static guesses as backup, discovery first
+    merged = list(dict.fromkeys(discovered + GEMINI_MODELS))[:6]
+    log(f"    Gemini models to try: {merged[:4]}")
+    _GEMINI_AVAILABLE = merged
+    return merged
+
+
 def gemini_generate(prompt):
     if not GEMINI_KEY:
         log("    ! No Gemini key — fallback selection")
@@ -497,19 +548,20 @@ def gemini_generate(prompt):
         "generationConfig": {"responseMimeType": "application/json",
                              "temperature": 0.2},
     }
-    for model in GEMINI_MODELS:
+    for model in gemini_models():
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                f"{model}:generateContent?key={GEMINI_KEY}")
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 r = requests.post(url, json=body, timeout=90)
             except Exception as e:
                 log(f"    ! Gemini {model} network error: {str(e)[:120]}")
                 break
-            if r.status_code == 429:
-                log(f"    Gemini {model}: rate-limited (429), waiting 25s "
-                    f"(attempt {attempt + 1}/3)")
-                time.sleep(25)
+            if r.status_code in (429, 503):
+                wait = 20 * (attempt + 1)
+                log(f"    Gemini {model}: busy ({r.status_code}), waiting {wait}s "
+                    f"(attempt {attempt + 1}/4)")
+                time.sleep(wait)
                 continue
             if r.status_code == 404:
                 log(f"    Gemini {model}: not available (404), trying next model")
@@ -521,6 +573,7 @@ def gemini_generate(prompt):
                 text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
                 text = re.sub(r"^```(?:json)?\s*|\s*```$", "",
                               text.strip(), flags=re.M).strip()
+                log(f"    Gemini model used: {model}")
                 return json.loads(text)
             except Exception as e:
                 log(f"    ! Gemini {model} bad response: {str(e)[:120]}")
