@@ -507,16 +507,66 @@ def get_spreadsheet():
     if not SERVICE_ACCOUNT_JSON:
         sys.exit("ERROR: service-account JSON secret not found. Set one of: "
                  "GOOGLE_SHEETS_CREDENTIALS / GOOGLE_CREDENTIALS / GCP_SERVICE_ACCOUNT "
-                 "/ SERVICE_ACCOUNT_JSON")
+                 "/ SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_JSON")
+    try:
+        info = json.loads(SERVICE_ACCOUNT_JSON)
+    except json.JSONDecodeError as e:
+        sys.exit("ERROR: the service-account secret is NOT valid JSON "
+                 f"({e}). Re-paste the FULL content of the downloaded .json "
+                 "key file into the GitHub secret (including { and }).")
+
+    # Auto-repair common paste problems in private_key
+    pk = info.get("private_key", "")
+    if "\\n" in pk and "\n" not in pk.replace("\\n", ""):
+        info["private_key"] = pk.replace("\\n", "\n")
+    missing = [k for k in ("client_email", "private_key", "project_id")
+               if not info.get(k)]
+    if missing:
+        sys.exit(f"ERROR: service-account JSON is missing fields: {missing}. "
+                 "The secret is probably a partial paste — re-paste the whole file.")
+
+    email = info.get("client_email", "")
+    masked = email[:6] + "***" + email[email.find("@"):] if "@" in email else "?"
+    log(f"service account: {masked}")
+
     creds = Credentials.from_service_account_info(
-        json.loads(SERVICE_ACCOUNT_JSON),
+        info,
         scopes=["https://www.googleapis.com/auth/spreadsheets",
                 "https://www.googleapis.com/auth/drive"])
     client = gspread.authorize(creds)
-    if SHEET_ID:
-        return client.open_by_key(SHEET_ID)
-    log("WARN: no SHEET_ID secret found, trying to open by name 'Trend Data'")
-    return client.open("Trend Data")
+    try:
+        if SHEET_ID:
+            return client.open_by_key(SHEET_ID)
+        log("WARN: no SHEET_ID secret found, trying to open by name 'Trend Data'")
+        return client.open("Trend Data")
+    except Exception as e:
+        err = str(e)
+        if "invalid_grant" in err or "Invalid JWT" in err:
+            sys.exit(
+                "ERROR: Google rejected the service-account key (invalid_grant / "
+                "Invalid JWT Signature).\n"
+                "FIX (Bangla): এই key টা আর বৈধ নেই। নতুন key বানাতে হবে:\n"
+                "  1) console.cloud.google.com → IAM & Admin → Service Accounts\n"
+                "  2) service account টা খোলো → KEYS ট্যাব → ADD KEY → "
+                "Create new key → JSON → Download\n"
+                "  3) ডাউনলোড হওয়া .json ফাইলের পুরো লেখাটা কপি করে GitHub → "
+                "Settings → Secrets → GOOGLE_SERVICE_ACCOUNT_JSON সিক্রেটে "
+                "Update করে পেস্ট করো\n"
+                "  4) Google Sheet-টা service account-এর email-এর সাথে Editor "
+                "হিসেবে Share করা আছে কি না দেখো\n"
+                f"Original error: {err[:300]}")
+        if "PERMISSION_DENIED" in err or "403" in err:
+            sys.exit(
+                "ERROR: the service account has NO access to this spreadsheet.\n"
+                f"FIX: Google Sheet → Share → add {email} as Editor.\n"
+                f"Original error: {err[:300]}")
+        if "404" in err or "not found" in err.lower():
+            sys.exit(
+                "ERROR: spreadsheet not found — the SHEET_ID secret looks wrong.\n"
+                "FIX: copy the ID from the sheet URL: "
+                "docs.google.com/spreadsheets/d/<THIS_PART>/edit\n"
+                f"Original error: {err[:300]}")
+        raise
 
 
 def get_worksheet(ss, name):
