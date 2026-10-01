@@ -5,6 +5,8 @@ on:
     # 03:30 UTC = 9:00 AM (India/Bangladesh time) — runs every day
     - cron: '30 3 * * *'
   workflow_dispatch: {}
+  push:
+    branches: [main]
 
 concurrency:
   group: daily-trends

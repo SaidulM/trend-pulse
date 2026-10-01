@@ -47,7 +47,8 @@ HEADERS_ROW = ["Date", "Platform", "Topic", "Popularity (Searches/Views)",
 
 CATEGORIES = ["Technology", "Islamic", "Trending (US)"]
 
-GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest",
+                 "gemini-2.0-flash-lite", "gemini-1.5-flash"]
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -350,7 +351,7 @@ def fetch_quora(query):
 # ----------------------------------------------------------------------------
 # Google Search (Autocomplete) — REAL queries people are typing in the US
 # ----------------------------------------------------------------------------
-def fetch_google_searches(seeds, limit=35):
+def fetch_google_searches(seeds, limit=35, group=""):
     """Live, high-interest search phrases from Google's free Autocomplete API.
     This is exactly 'what people are searching for' — ideal article topics."""
     items, seen = [], set()
@@ -370,29 +371,56 @@ def fetch_google_searches(seeds, limit=35):
             if not s or key == seed.lower() or key in seen or UNSAFE.search(s):
                 continue
             seen.add(key)
-            items.append(mk(s, "Google Search",
-                            "Top US search" if rank < 3 else "US search query",
-                            f'People in the US are actively searching: "{s}"',
-                            f"https://www.google.com/search?q={quote(s)}",
-                            "Google Autocomplete (US)"))
+            it = mk(s, "Google Search",
+                    "Top US search" if rank < 3 else "US search query",
+                    f'People in the US are actively searching: "{s}"',
+                    f"https://www.google.com/search?q={quote(s)}",
+                    "Google Autocomplete (US)")
+            if group:
+                it["group"] = group
+            items.append(it)
         if len(items) >= limit:
             break
         time.sleep(0.3)
     return items
 
 
-# সিড-কিওয়ার্ড: এগুলো থেকে Google নিজেই দেখাবে মানুষ এখন ঠিক কী খুঁজছে
-TECH_SEEDS = [
-    "how to use ai for", "best ai tools for", "what is the new",
-    "how to fix my phone", "best laptop for", "iphone vs",
-    "how does chatgpt", "is it safe to", "best free apps for",
-    "how to protect your data",
+# সিড-কিওয়ার্ড: এগুলো থেকে Google নিজেই দেখাবে মানুষ এখন ঠিক কী খুঁজছে।
+# প্রতিদিন সিড-লিস্ট ঘুরিয়ে নেওয়া হয়, তাই প্রতিদিন নতুন নতুন টপিক আসে।
+AI_SEEDS = [
+    "how to use ai for", "best ai tools for", "how does chatgpt",
+    "can ai help me", "best free ai", "how to make money with ai",
+    "ai for beginners", "what is the best ai app for", "how to learn ai",
+    "is chatgpt good for",
+]
+GADGET_SEEDS = [
+    "best laptop for", "best phone for", "iphone vs", "best smartwatch for",
+    "best wireless earbuds for", "how to fix my phone", "best budget gadgets",
+    "best tablet for", "is it worth buying", "best home security camera",
 ]
 ISLAMIC_SEEDS = [
     "dua for", "how to pray", "quran verses about", "what does islam say about",
     "islamic meaning of", "how to make wudu", "surah for", "prophet muhammad",
-    "is it haram to", "ramadan",
+    "is it haram to", "ramadan", "how to perform", "islamic dream meaning of",
+    "benefits of reading surah", "dhikr for", "sunnah of",
 ]
+
+
+def rotate(lst, n):
+    """Rotate a list so different seeds lead on different days (variety)."""
+    n = n % len(lst)
+    return lst[n:] + lst[:n]
+
+
+def clean(items):
+    """Drop junk/homepage/generic-thread items from any platform list."""
+    return [it for it in items if it["topic"] and not is_junk(it["topic"])]
+
+
+def relevant(items, pattern):
+    """Keep only items matching the category pattern."""
+    return [it for it in items
+            if pattern.search(it["topic"] + " " + it["description"])]
 
 TECH_WORDS = re.compile(
     r"\b(ai|iphone|android|google|apple|microsoft|tesla|spacex|nvidia|intel|amd|"
@@ -406,43 +434,47 @@ ISLAM_WORDS = re.compile(
 
 
 def collect_technology():
+    day = datetime.now(timezone.utc).timetuple().tm_yday
     data = {}
-    trends = fetch_google_trends()
-    # আসল সার্চ-ভলিউমসহ টেক-রিলেটেড ট্রেন্ড + অটোকমপ্লিটের রিয়েল সার্চ কোয়েরি
-    # রিয়েল সার্চ কোয়েরি আগে, তারপর সার্চ-ভলিউমসহ টেক-রিলেটেড ট্রেন্ড
-    data["Google Search"] = (fetch_google_searches(TECH_SEEDS)
-                             + [t for t in trends
-                                if TECH_WORDS.search(t["topic"] + " " + t["description"])])
-    data["YouTube"] = fetch_youtube_most_popular(video_category_id=28)
-    data["Reddit"] = fetch_reddit("technology")
-    data["Google News"] = fetch_google_news(topic="TECHNOLOGY")
-    data["Bing News"] = fetch_bing_news("technology news")
-    data["Quora"] = fetch_quora("technology AI gadgets")
+    # Google Search: ঠিক দুই গ্রুপ — একটি AI, একটি Gadget (রিয়েল US সার্চ কোয়েরি)
+    ai = fetch_google_searches(rotate(AI_SEEDS, day)[:5], group="AI")
+    gadget = fetch_google_searches(rotate(GADGET_SEEDS, day)[:5], group="Gadget")
+    data["Google Search"] = clean(ai) + clean(gadget)
+    data["YouTube"] = clean(fetch_youtube_most_popular(video_category_id=28))
+    data["Reddit"] = clean(fetch_reddit("technology"))
+    data["Google News"] = clean(fetch_google_news(topic="TECHNOLOGY"))
+    bing = clean(fetch_bing_news("technology news"))
+    data["Bing News"] = relevant(bing, TECH_WORDS) or bing
+    quora = clean(fetch_quora("technology AI gadgets smartphone"))
+    data["Quora"] = relevant(quora, TECH_WORDS) or quora
     return data
 
 
 def collect_islamic():
+    day = datetime.now(timezone.utc).timetuple().tm_yday
     data = {}
-    trends = fetch_google_trends()
-    data["Google Search"] = (fetch_google_searches(ISLAMIC_SEEDS)
-                             + [t for t in trends
-                                if ISLAM_WORDS.search(t["topic"] + " " + t["description"])])
-    data["YouTube"] = fetch_youtube_search("islamic lecture OR islam OR quran recitation")
-    data["Reddit"] = fetch_reddit("islam")
-    data["Google News"] = fetch_google_news(query="islam OR muslim OR quran OR ramadan OR hajj")
-    data["Bing News"] = fetch_bing_news("islam muslim")
-    data["Quora"] = fetch_quora("islam quran")
+    data["Google Search"] = clean(
+        fetch_google_searches(rotate(ISLAMIC_SEEDS, day)[:7]))
+    yt = clean(fetch_youtube_search("islamic lecture OR islam OR quran recitation"))
+    data["YouTube"] = relevant(yt, ISLAM_WORDS) or yt
+    data["Reddit"] = clean(fetch_reddit("islam"))
+    # News/Bing/Quora: ক্যাটেগরির বাইরের টপিক একদম ঢুকবে না (strict filter)
+    data["Google News"] = relevant(clean(fetch_google_news(
+        query="islam OR muslim OR quran OR ramadan OR hajj")), ISLAM_WORDS)
+    data["Bing News"] = relevant(clean(fetch_bing_news("islam muslim quran")),
+                                 ISLAM_WORDS)
+    data["Quora"] = relevant(clean(fetch_quora("islam quran dua")), ISLAM_WORDS)
     return data
 
 
 def collect_trending():
     data = {}
-    data["Google Trends"] = fetch_google_trends()
-    data["YouTube"] = fetch_youtube_most_popular()
-    data["Reddit"] = fetch_reddit("popular")
-    data["Google News"] = fetch_google_news(topic="WORLD")
-    data["Bing News"] = fetch_bing_news("trending viral news US")
-    data["Quora"] = fetch_quora("trending this week")
+    data["Google Trends"] = clean(fetch_google_trends())
+    data["YouTube"] = clean(fetch_youtube_most_popular())
+    data["Reddit"] = clean(fetch_reddit("popular"))
+    data["Google News"] = clean(fetch_google_news(topic="WORLD"))
+    data["Bing News"] = clean(fetch_bing_news("trending viral news US"))
+    data["Quora"] = clean(fetch_quora("trending questions"))
     return data
 
 
@@ -458,6 +490,7 @@ COLLECTORS = {
 # ----------------------------------------------------------------------------
 def gemini_generate(prompt):
     if not GEMINI_KEY:
+        log("    ! No Gemini key — fallback selection")
         return None
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -467,16 +500,32 @@ def gemini_generate(prompt):
     for model in GEMINI_MODELS:
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                f"{model}:generateContent?key={GEMINI_KEY}")
-        try:
-            r = requests.post(url, json=body, timeout=60)
-            if r.status_code in (404, 429):
+        for attempt in range(3):
+            try:
+                r = requests.post(url, json=body, timeout=90)
+            except Exception as e:
+                log(f"    ! Gemini {model} network error: {str(e)[:120]}")
+                break
+            if r.status_code == 429:
+                log(f"    Gemini {model}: rate-limited (429), waiting 25s "
+                    f"(attempt {attempt + 1}/3)")
+                time.sleep(25)
                 continue
-            r.raise_for_status()
-            text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(text)
-        except Exception as e:
-            log(f"    ! Gemini {model} failed: {e}")
-            continue
+            if r.status_code == 404:
+                log(f"    Gemini {model}: not available (404), trying next model")
+                break
+            if r.status_code != 200:
+                log(f"    ! Gemini {model}: HTTP {r.status_code}: {r.text[:150]}")
+                break
+            try:
+                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                text = re.sub(r"^```(?:json)?\s*|\s*```$", "",
+                              text.strip(), flags=re.M).strip()
+                return json.loads(text)
+            except Exception as e:
+                log(f"    ! Gemini {model} bad response: {str(e)[:120]}")
+                break
+    log("    ! ALL Gemini models failed — using deterministic fallback")
     return None
 
 
@@ -486,7 +535,8 @@ def select_with_gemini(category, platform_items, already_used):
     catalog = {}
     for platform, items in platform_items.items():
         catalog[platform] = [
-            {"i": i, "topic": it["topic"], "popularity": it["popularity"]}
+            {"i": i, "topic": it["topic"], "popularity": it["popularity"],
+             **({"group": it["group"]} if it.get("group") else {})}
             for i, it in enumerate(items[:15])
         ]
     prompt = (
@@ -506,6 +556,9 @@ def select_with_gemini(category, platform_items, already_used):
         "homepages, or anything a blogger could not write a useful article about.\n"
         "5. NEVER pick a topic identical or nearly identical to anything in "
         "ALREADY_USED, and no near-duplicates across platforms in this selection.\n"
+        "6. If a platform's candidates carry a 'group' field, pick exactly ONE "
+        "item from EACH distinct group (e.g. one 'AI' topic and one 'Gadget' "
+        "topic for Google Search in Technology).\n"
         "For every pick also write 'angle': ONE short sentence (max 18 words) "
         "suggesting the article angle a blogger should take.\n"
         'Return ONLY JSON: {"<platform>": [{"i": 0, "angle": "..."}, '
@@ -542,6 +595,9 @@ JUNK = re.compile(
     r"the latest in technology|today'?s latest|"
     r"breaking news, (analysis|headlines)|^\s*viral trends\s*$|"
     r"^[\w .']{2,30}news\s*[-|–]\s*[\w .']+$|"
+    r"^[\w ,&.']{2,35}[-|–]\s*(the )?(new york times|nytimes|cnbc|cnn|bbc|wired|"
+    r"reuters|forbes|guardian|wsj|bloomberg|verge|techcrunch)[\w -]{0,10}$|"
+    r"^google news\b|^(technology|tech|world|islam)\s*[-|–]|[-|–]\s*latest\s*$|"
     r"\|\s*(reuters|cnn|bbc|techcrunch|the verge)\s*$)", re.I)
 
 
@@ -574,22 +630,32 @@ def pick_topics(category, platform_items, already_used):
                                              (f" | {base}" if base else ""))[:250]
                     picks.append(it)
                     used_norm.add(normalize(it["topic"]))
-    # Fill any platform that still has < TOPICS_PER_PLATFORM picks
-    picked_by_key = {}
+    # Fill any platform that still has < TOPICS_PER_PLATFORM picks.
+    # Group-aware: if items carry a group (AI/Gadget), take one per group.
+    picked_by_key, groups_done = {}, {}
     for p in picks:
         k = p.get("_key") or p["platform"]
         picked_by_key[k] = picked_by_key.get(k, 0) + 1
+        if p.get("group"):
+            groups_done.setdefault(k, set()).add(p["group"])
     for platform, items in platform_items.items():
         have = picked_by_key.get(platform, 0)
+        done = groups_done.setdefault(platform, set())
         for it in items:
             if have >= TOPICS_PER_PLATFORM:
                 break
+            g = it.get("group")
+            if g and g in done:
+                continue
             n = normalize(it["topic"])
             if it["topic"] and n not in used_norm and not is_junk(it["topic"]):
                 picks.append(it)
                 used_norm.add(n)
                 have += 1
-    return [{k: v for k, v in p.items() if k != "_key"} for p in picks]
+                if g:
+                    done.add(g)
+    return [{k: v for k, v in p.items() if k not in ("_key", "group")}
+            for p in picks]
 
 
 # ----------------------------------------------------------------------------
@@ -687,26 +753,36 @@ def parse_date(s):
         return None
 
 
-def cleanup_old_rows(ws):
-    """Delete rows older than RETENTION_DAYS. Returns surviving topics set."""
+def prepare_sheet(ws):
+    """Delete rows older than RETENTION_DAYS AND today's rows (a re-run on the
+    same day REPLACES today's picks instead of piling up duplicates).
+    Returns the set of topics from previous days (for dedupe)."""
     values = ws.get_all_values()
     if len(values) <= 1:
         return set()
-    cutoff = datetime.utcnow() - timedelta(days=RETENTION_DAYS)
-    keep, removed = [values[0]], 0
+    now = datetime.now(timezone.utc)
+    cutoff = now.replace(tzinfo=None) - timedelta(days=RETENTION_DAYS)
+    today_d = now.date()
+    keep, removed_old, removed_today = [values[0]], 0, 0
     topics = set()
     for row in values[1:]:
         d = parse_date(row[0]) if row else None
         if d is not None and d < cutoff:
-            removed += 1
+            removed_old += 1
+            continue
+        if d is not None and d.date() == today_d:
+            removed_today += 1
             continue
         keep.append(row)
         if len(row) > 2:
             topics.add(row[2])
-    if removed:
+    if removed_old or removed_today:
         ws.clear()
         ws.update(values=keep, range_name="A1")
-        log(f"    cleaned {removed} rows older than {RETENTION_DAYS} days")
+        if removed_old:
+            log(f"    cleaned {removed_old} rows older than {RETENTION_DAYS} days")
+        if removed_today:
+            log(f"    replacing {removed_today} rows from today with fresh picks")
     return topics
 
 
@@ -721,21 +797,14 @@ def main():
         f"youtube: {'OK' if YOUTUBE_KEY else 'missing (YouTube skipped)'}")
 
     ss = get_spreadsheet()
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     used_topics = set()  # across categories today -> keeps categories distinct
 
     total = 0
     for category in CATEGORIES:
         log(f"\n[{category}]")
         ws = get_worksheet(ss, category)
-        existing = cleanup_old_rows(ws)
-
-        # Re-run safety: note today's rows so we don't duplicate them
-        today_d = datetime.utcnow().date()
-        todays = [r for r in ws.get_all_values()[1:]
-                  if r and parse_date(r[0]) and parse_date(r[0]).date() == today_d]
-        if todays:
-            log(f"    already has {len(todays)} rows for {today}, topping up only")
+        existing = prepare_sheet(ws)  # removes expired + today's rows
 
         try:
             platform_items = COLLECTORS[category]()
@@ -746,7 +815,7 @@ def main():
         for p, items in platform_items.items():
             log(f"    {p}: {len(items)} candidates")
 
-        already = existing | used_topics | {r[2] for r in todays if len(r) > 2}
+        already = existing | used_topics
         picks = pick_topics(category, platform_items, already)
 
         rows = []
@@ -754,15 +823,17 @@ def main():
             rows.append([today, it["platform"], it["topic"], it["popularity"],
                          it["description"], it["link"], it["source"]])
             used_topics.add(it["topic"])
+            log(f"    + [{it['platform']}] {it['topic'][:70]}"
+                f"{' | ' + it['popularity'] if it['popularity'] else ''}")
 
         if rows:
             ws.append_rows(rows, value_input_option="USER_ENTERED")
-            log(f"    ✅ appended {len(rows)} rows")
+            log(f"    ✅ wrote {len(rows)} rows")
             total += len(rows)
         else:
             log("    ⚠ nothing new to add")
 
-    log(f"\n== Done: {total} new rows ==")
+    log(f"\n== Done: {total} rows written ==")
 
 
 if __name__ == "__main__":
