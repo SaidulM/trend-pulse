@@ -348,21 +348,71 @@ def fetch_quora(query):
 
 
 # ----------------------------------------------------------------------------
-# Per-category collection
+# Google Search (Autocomplete) — REAL queries people are typing in the US
 # ----------------------------------------------------------------------------
+def fetch_google_searches(seeds, limit=35):
+    """Live, high-interest search phrases from Google's free Autocomplete API.
+    This is exactly 'what people are searching for' — ideal article topics."""
+    items, seen = [], set()
+    for seed in seeds:
+        url = ("https://suggestqueries.google.com/complete/search"
+               f"?client=firefox&hl=en&gl=us&q={quote(seed)}")
+        r = safe_get(url)
+        if not r:
+            continue
+        try:
+            suggestions = json.loads(r.text)[1]
+        except Exception:
+            continue
+        for rank, s in enumerate(suggestions[:8]):
+            s = s.strip()
+            key = s.lower()
+            if not s or key == seed.lower() or key in seen or UNSAFE.search(s):
+                continue
+            seen.add(key)
+            items.append(mk(s, "Google Search",
+                            "Top US search" if rank < 3 else "US search query",
+                            f'People in the US are actively searching: "{s}"',
+                            f"https://www.google.com/search?q={quote(s)}",
+                            "Google Autocomplete (US)"))
+        if len(items) >= limit:
+            break
+        time.sleep(0.3)
+    return items
+
+
+# সিড-কিওয়ার্ড: এগুলো থেকে Google নিজেই দেখাবে মানুষ এখন ঠিক কী খুঁজছে
+TECH_SEEDS = [
+    "how to use ai for", "best ai tools for", "what is the new",
+    "how to fix my phone", "best laptop for", "iphone vs",
+    "how does chatgpt", "is it safe to", "best free apps for",
+    "how to protect your data",
+]
+ISLAMIC_SEEDS = [
+    "dua for", "how to pray", "quran verses about", "what does islam say about",
+    "islamic meaning of", "how to make wudu", "surah for", "prophet muhammad",
+    "is it haram to", "ramadan",
+]
+
 TECH_WORDS = re.compile(
     r"\b(ai|iphone|android|google|apple|microsoft|tesla|spacex|nvidia|intel|amd|"
     r"openai|chatgpt|gemini|robot|tech|app|software|chip|crypto|bitcoin|gpu|"
     r"samsung|meta|amazon|playstation|xbox|nintendo|cyber|hack|update|launch|"
     r"galaxy|pixel|windows|ios|macbook|laptop|phone|gaming|game)\b", re.I)
 
+ISLAM_WORDS = re.compile(
+    r"\b(islam|islamic|muslim|quran|koran|ramadan|eid|hajj|umrah|mosque|masjid|"
+    r"halal|dua|surah|allah|prophet|muhammad|mecca|makkah|madinah)\b", re.I)
+
 
 def collect_technology():
     data = {}
     trends = fetch_google_trends()
-    data["Google Trends"] = [t for t in trends if TECH_WORDS.search(t["topic"] + " " + t["description"])]
-    if not data["Google Trends"]:
-        data["Google Trends"] = []
+    # আসল সার্চ-ভলিউমসহ টেক-রিলেটেড ট্রেন্ড + অটোকমপ্লিটের রিয়েল সার্চ কোয়েরি
+    # রিয়েল সার্চ কোয়েরি আগে, তারপর সার্চ-ভলিউমসহ টেক-রিলেটেড ট্রেন্ড
+    data["Google Search"] = (fetch_google_searches(TECH_SEEDS)
+                             + [t for t in trends
+                                if TECH_WORDS.search(t["topic"] + " " + t["description"])])
     data["YouTube"] = fetch_youtube_most_popular(video_category_id=28)
     data["Reddit"] = fetch_reddit("technology")
     data["Google News"] = fetch_google_news(topic="TECHNOLOGY")
@@ -373,7 +423,10 @@ def collect_technology():
 
 def collect_islamic():
     data = {}
-    data["Google Trends"] = []  # daily US trends rarely contain Islamic topics
+    trends = fetch_google_trends()
+    data["Google Search"] = (fetch_google_searches(ISLAMIC_SEEDS)
+                             + [t for t in trends
+                                if ISLAM_WORDS.search(t["topic"] + " " + t["description"])])
     data["YouTube"] = fetch_youtube_search("islamic lecture OR islam OR quran recitation")
     data["Reddit"] = fetch_reddit("islam")
     data["Google News"] = fetch_google_news(query="islam OR muslim OR quran OR ramadan OR hajj")
@@ -428,43 +481,74 @@ def gemini_generate(prompt):
 
 
 def select_with_gemini(category, platform_items, already_used):
-    """Ask Gemini to pick the best TOPICS_PER_PLATFORM per platform.
-    Returns {platform: [indices]} or None on failure."""
+    """Ask Gemini to pick the best TOPICS_PER_PLATFORM per platform and add an
+    article angle for each. Returns {platform: [(index, angle), ...]} or None."""
     catalog = {}
     for platform, items in platform_items.items():
         catalog[platform] = [
             {"i": i, "topic": it["topic"], "popularity": it["popularity"]}
-            for i, it in enumerate(items[:12])
+            for i, it in enumerate(items[:15])
         ]
     prompt = (
-        "You curate a daily trending-topics sheet.\n"
+        "You are an expert SEO content strategist curating daily topics for a "
+        "blogger who writes helpful articles for a US audience.\n"
         f"Category: {category}\n"
         f"Pick EXACTLY {TOPICS_PER_PLATFORM} items per platform (fewer only if "
-        "the platform has fewer candidates). Rules:\n"
-        f"1. Choose the MOST trending/popular/interesting topics for '{category}'. "
-        "Prefer items with higher popularity numbers.\n"
-        "2. Topic must genuinely fit the category "
-        "(for 'Islamic' only Islam-related; for 'Technology' only tech-related; "
-        "'Trending (US)' = whatever is hottest in the United States).\n"
-        "3. Do NOT pick a topic that is the same as, or nearly identical to, any "
-        "topic in the ALREADY_USED list, and do not pick near-duplicates across "
-        "platforms within this selection.\n"
-        "Return ONLY JSON like {\"Google Trends\": [0, 3], \"YouTube\": [1, 2], ...} "
-        "using each platform name as key and selected candidate 'i' values.\n\n"
+        "the platform has fewer candidates). Selection rules, in priority order:\n"
+        "1. PREFER topics with clear informational search intent — things people "
+        "actively search to learn, understand, solve a problem, or decide "
+        "something (how-to, what-is, best-X, guides). These make great articles.\n"
+        "2. Prefer higher popularity numbers (searches/views/upvotes) when shown.\n"
+        f"3. The topic must genuinely belong to '{category}' "
+        "(Islamic = only Islam-related; Technology = only tech-related; "
+        "'Trending (US)' = whatever Americans are hottest on right now).\n"
+        "4. AVOID low-value picks: one-line gossip, pure clickbait, website "
+        "homepages, or anything a blogger could not write a useful article about.\n"
+        "5. NEVER pick a topic identical or nearly identical to anything in "
+        "ALREADY_USED, and no near-duplicates across platforms in this selection.\n"
+        "For every pick also write 'angle': ONE short sentence (max 18 words) "
+        "suggesting the article angle a blogger should take.\n"
+        'Return ONLY JSON: {"<platform>": [{"i": 0, "angle": "..."}, '
+        '{"i": 3, "angle": "..."}], ...}\n\n'
         f"CANDIDATES:\n{json.dumps(catalog, ensure_ascii=False)}\n\n"
-        f"ALREADY_USED (recent topics in sheet + other categories today):\n"
+        f"ALREADY_USED (recent sheet topics + other categories today):\n"
         f"{json.dumps(sorted(already_used)[:300], ensure_ascii=False)}"
     )
     result = gemini_generate(prompt)
     if not isinstance(result, dict):
         return None
     out = {}
-    for platform, idxs in result.items():
-        if platform in platform_items and isinstance(idxs, list):
-            valid = [i for i in idxs if isinstance(i, int)
-                     and 0 <= i < len(platform_items[platform])]
-            out[platform] = valid[:TOPICS_PER_PLATFORM]
+    for platform, picks in result.items():
+        if platform not in platform_items or not isinstance(picks, list):
+            continue
+        valid = []
+        for p in picks:
+            if isinstance(p, dict) and isinstance(p.get("i"), int):
+                i, angle = p["i"], str(p.get("angle") or "")
+            elif isinstance(p, int):
+                i, angle = p, ""
+            else:
+                continue
+            if 0 <= i < len(platform_items[platform]):
+                valid.append((i, angle.strip()))
+        out[platform] = valid[:TOPICS_PER_PLATFORM]
     return out
+
+
+JUNK = re.compile(
+    r"(free[- ]?talk|daily thread|weekly thread|megathread|open thread|"
+    r"verse of the day|discussion thread|moronic monday|"
+    r"latest technology news|startup and technology news|"
+    r"the latest in technology|today'?s latest|"
+    r"breaking news, (analysis|headlines)|^\s*viral trends\s*$|"
+    r"^[\w .']{2,30}news\s*[-|–]\s*[\w .']+$|"
+    r"[-|–]\s*(reuters|cnbc|cnn|bbc|wired|techcrunch|the verge)\s*$|"
+    r"\|\s*(reuters|cnn|bbc|techcrunch|the verge)\s*$)", re.I)
+
+
+def is_junk(topic):
+    """Generic threads / website homepages — useless as article topics."""
+    return bool(JUNK.search(topic or ""))
 
 
 def normalize(topic):
@@ -480,24 +564,33 @@ def pick_topics(category, platform_items, already_used):
     selection = select_with_gemini(category, platform_items, already_used)
     if selection:
         log("    Gemini selection OK")
-        for platform, idxs in selection.items():
-            for i in idxs:
-                it = platform_items[platform][i]
+        for platform, chosen in selection.items():
+            for i, angle in chosen:
+                it = dict(platform_items[platform][i])
+                it["_key"] = platform
                 if normalize(it["topic"]) not in used_norm and it["topic"]:
+                    if angle:
+                        base = it["description"]
+                        it["description"] = (f"✍️ Angle: {angle}" +
+                                             (f" | {base}" if base else ""))[:250]
                     picks.append(it)
                     used_norm.add(normalize(it["topic"]))
     # Fill any platform that still has < TOPICS_PER_PLATFORM picks
+    picked_by_key = {}
+    for p in picks:
+        k = p.get("_key") or p["platform"]
+        picked_by_key[k] = picked_by_key.get(k, 0) + 1
     for platform, items in platform_items.items():
-        have = sum(1 for p in picks if p["platform"] == platform)
+        have = picked_by_key.get(platform, 0)
         for it in items:
             if have >= TOPICS_PER_PLATFORM:
                 break
             n = normalize(it["topic"])
-            if it["topic"] and n not in used_norm:
+            if it["topic"] and n not in used_norm and not is_junk(it["topic"]):
                 picks.append(it)
                 used_norm.add(n)
                 have += 1
-    return picks
+    return [{k: v for k, v in p.items() if k != "_key"} for p in picks]
 
 
 # ----------------------------------------------------------------------------
